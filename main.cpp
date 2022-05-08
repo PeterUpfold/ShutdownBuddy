@@ -20,10 +20,9 @@ int _tmain(int argc, TCHAR* argv[]) {
 	PLUID nextLogonSessionID = nullptr;
 
 	NTSTATUS result = LsaEnumerateLogonSessions(&logonSessionCount, &logonSessionListPtr);
-	originalSessionCount = logonSessionCount;
 
 	if (STATUS_SUCCESS != result) {
-		printf("Faield to get logon session count: 0x%x", result);
+		printf("Failed to get logon session count: 0x%x", result);
 		return result;
 	}
 
@@ -39,11 +38,17 @@ int _tmain(int argc, TCHAR* argv[]) {
 			printf("LsaGetLogonSession data fail: 0x%x\n", result);
 		}
 
-		logonSessionListPtr += sizeof(PLUID);
-		originalSessionCount--;
-		printf("logonSessionCount now: %lld\n", originalSessionCount);
+		//printf("ptr before 0x%x\n", logonSessionListPtr);
+		//logonSessionListPtr += (sizeof(PLUID));
+		logonSessionListPtr++; // why does this work?? -- increments pointer by 64 bits correctly.
+		//printf("ptr after 0x%x\n\n", logonSessionListPtr);
+
+		logonSessionCount--;
+
+		LsaFreeReturnBuffer(logonSessionData);
+
 	}
-	while (originalSessionCount > 0);
+	while (logonSessionCount > 0);
 
 	LsaFreeReturnBuffer(logonSessionListPtr);
 
