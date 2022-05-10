@@ -41,7 +41,7 @@ WCHAR logBuffer[MAX_PATH] = { 0 };
 #define LOG_BUFFER_SIZE (MAX_PATH * sizeof(WCHAR))
 #define SERVICE_NAME L"ShutdownBuddy"
 
-#define WAIT_TIMER_INTERVAL_SECONDS 5
+#define WAIT_TIMER_INTERVAL_SECONDS 60
 #define MS_IN_S 1000
 #define HUNDREDNS_IN_MS 10000
 
@@ -56,6 +56,7 @@ WCHAR logBuffer[MAX_PATH] = { 0 };
 * for the signal and, if so, stop the worker thread in an orderly fashion.
 */
 HANDLE workerWaitableTimer = INVALID_HANDLE_VALUE;
+LARGE_INTEGER timerDueTime;
 HANDLE serviceToStopEvent = INVALID_HANDLE_VALUE;
 HANDLE workerThread = INVALID_HANDLE_VALUE;
 
@@ -93,8 +94,6 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR* argv) {
 	// prepare temporary file for logging
 	WCHAR tempPath[MAX_PATH + 1] = { 0 };
 	WCHAR tempFileName[MAX_PATH + 1] = { 0 };
-	LARGE_INTEGER timerDueTime;
-	
 
 	if (GetTempPath(MAX_PATH, tempPath) == 0) {
 		wprintf(L"Unable to get temp path name\n");
@@ -163,7 +162,25 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR* argv) {
 	}
 
 	// start timer
-	SetWaitableTimer(workerWaitableTimer, &timerDueTime, WAIT_TIMER_INTERVAL_SECONDS * MS_IN_S, NULL, NULL, FALSE);
+	if (!SetWaitableTimer(workerWaitableTimer, &timerDueTime, 0, NULL, NULL, FALSE)) {
+		wprintf(L"Failed to set waitiable timer -- error %d", GetLastError());
+		BailOnServiceStart;
+	}
+
+
+	// tell the Service Manager we are started
+	ZeroMemory(&serviceStatus, sizeof(serviceStatus));
+	serviceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
+	serviceStatus.dwCurrentState = SERVICE_RUNNING;
+	serviceStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP;
+	serviceStatus.dwWin32ExitCode = 0;
+	serviceStatus.dwServiceSpecificExitCode = 0;
+	serviceStatus.dwCheckPoint = 0;
+	serviceStatus.dwWaitHint = 0;
+	if (!SetServiceStatus(statusHandle, &serviceStatus)) {
+		wprintf(L"SetServiceStatus returned FALSE -- error %d\n", GetLastError());
+		return;
+	}
 
 	WaitForSingleObject(workerThread, INFINITE);
 
@@ -234,16 +251,26 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam) {
 		// check for the signalled state of the stop event
 		if (waitResult == WAIT_OBJECT_0) {
 			// being signalled to stop
+			StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Worker thread signalled by event to stop.\n");
+			WriteBufferToLog();
 			return ERROR_SUCCESS;
 		}
-		StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Worker thread wait result is %d", waitResult);
-		WriteBufferToLog();
-		
-		
+		// reset timer -- seems to be easier with a negative due QuadPart than an auto interval??
+		if (!SetWaitableTimer(workerWaitableTimer, &timerDueTime, 0, NULL, NULL, FALSE)) {
+			StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Failed to reset waitiable timer -- error %d", GetLastError());
+			WriteBufferToLog();
+			return GetLastError();
+		}
+
+		/*StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Worker thread wait result is %d\n", waitResult);
+		WriteBufferToLog();*/
+
 		result = LsaEnumerateLogonSessions(&logonSessionCount, &logonSessionListPtr);
 
 		if (STATUS_SUCCESS != result) {
-			wprintf(L"Failed to get logon session count: 0x%x", result);
+			wprintf(L"Failed to get logon session count: 0x%x. Will retry on next cycle\n", result);
+			// wait for either the timer or the event
+			waitResult = WaitForMultipleObjects(2, waitableObjects, FALSE, INFINITE);
 			continue;
 		}
 
