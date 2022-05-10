@@ -12,13 +12,52 @@
 #define assert(expression) if (!(expression)) { printf("assert on %d", __LINE__); /*TODO assert when in the service needs to be intelligent */ExitProcess(250); }
 
 
+/*
+* Macro to fail starting the service and actually report this back to the Service Manager
+*  This is a messy macro, but I don't want to call another function in these failure cases
+* and have to manage the scope of &serviceStatus differently.
+*/
+#define BailOnServiceStart ZeroMemory(&serviceStatus, sizeof(serviceStatus));\
+serviceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;\
+serviceStatus.dwCurrentState = SERVICE_STOPPED;\
+serviceStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP;\
+serviceStatus.dwWin32ExitCode = GetLastError();\
+serviceStatus.dwServiceSpecificExitCode = GetLastError();\
+serviceStatus.dwCheckPoint = 0;\
+serviceStatus.dwWaitHint = 0;\
+if (!SetServiceStatus(statusHandle, &serviceStatus)) {\
+	wprintf(L"SetServiceStatus returned FALSE -- error %d\n", GetLastError());\
+	return;\
+}\
+if (INVALID_HANDLE_VALUE != logHandle) {\
+	CloseHandle(logHandle);\
+}\
+return;
+
 SERVICE_STATUS serviceStatus = { 0 };
 SERVICE_STATUS_HANDLE statusHandle = nullptr;
-HANDLE serviceStopEvent = INVALID_HANDLE_VALUE;
 HANDLE logHandle = INVALID_HANDLE_VALUE;
 WCHAR logBuffer[MAX_PATH] = { 0 };
 #define LOG_BUFFER_SIZE (MAX_PATH * sizeof(WCHAR))
 #define SERVICE_NAME L"ShutdownBuddy"
+
+#define WAIT_TIMER_INTERVAL_SECONDS 5
+#define MS_IN_S 1000
+#define HUNDREDNS_IN_MS 10000
+
+/* Synchronisation and looping
+* 
+* We will have an Event which can be signalled to stop the worker thread
+* and also a WaitableTimer for the worker thread so that we do not poll
+* user session state too frequently.
+* 
+* We will WaitForMultipleObjects on either of these to be signalled in the
+* worker thread. When signalled, we will check to see if the Event was the reason
+* for the signal and, if so, stop the worker thread in an orderly fashion.
+*/
+HANDLE workerWaitableTimer = INVALID_HANDLE_VALUE;
+HANDLE serviceToStopEvent = INVALID_HANDLE_VALUE;
+HANDLE workerThread = INVALID_HANDLE_VALUE;
 
 /// <summary>
 /// Entry point
@@ -54,6 +93,7 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR* argv) {
 	// prepare temporary file for logging
 	WCHAR tempPath[MAX_PATH + 1] = { 0 };
 	WCHAR tempFileName[MAX_PATH + 1] = { 0 };
+	LARGE_INTEGER timerDueTime;
 	
 
 	if (GetTempPath(MAX_PATH, tempPath) == 0) {
@@ -82,6 +122,9 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR* argv) {
 		return;
 	}
 
+	/*
+	Service is starting
+	*/
 	ZeroMemory(&serviceStatus, sizeof(serviceStatus));
 	serviceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
 	serviceStatus.dwCurrentState = SERVICE_START_PENDING;
@@ -95,12 +138,58 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR* argv) {
 		return;
 	}
 
-exit:
-	if (INVALID_HANDLE_VALUE != logHandle) {
-		CloseHandle(logHandle);
+
+	// create synchronisation objects -- timer
+	workerWaitableTimer = CreateWaitableTimer(NULL, TRUE, NULL);
+	if (workerWaitableTimer == NULL) {
+		wprintf(L"Unable to create waitable timer for the worker thread -- error %d\n", GetLastError());
+		BailOnServiceStart;
+	}
+	timerDueTime.QuadPart = -(WAIT_TIMER_INTERVAL_SECONDS * MS_IN_S * HUNDREDNS_IN_MS);
+
+
+	// prepare the stop event
+	serviceToStopEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+	if (serviceToStopEvent == NULL) {
+		wprintf(L"Unable to create the event to notify worker thread on service stop -- error %d", GetLastError());
+		BailOnServiceStart;
 	}
 
-	
+	// start worker thread
+	workerThread = CreateThread(NULL, 0, ServiceWorkerThread, NULL, 0, NULL);
+	if (workerThread == NULL) {
+		wprintf(L"Failed to create WorkerThread -- error %d", GetLastError());
+		BailOnServiceStart;
+	}
+
+	// start timer
+	SetWaitableTimer(workerWaitableTimer, &timerDueTime, WAIT_TIMER_INTERVAL_SECONDS * MS_IN_S, NULL, NULL, FALSE);
+
+	WaitForSingleObject(workerThread, INFINITE);
+
+exit:
+	/*
+	Service has stopped
+	*/
+	ZeroMemory(&serviceStatus, sizeof(serviceStatus));
+	serviceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
+	serviceStatus.dwCurrentState = SERVICE_STOPPED;
+	serviceStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP;
+	serviceStatus.dwWin32ExitCode = 0;
+	serviceStatus.dwServiceSpecificExitCode = 0;
+	serviceStatus.dwCheckPoint = 0;
+	serviceStatus.dwWaitHint = 0;
+	if (!SetServiceStatus(statusHandle, &serviceStatus)) {
+		wprintf(L"SetServiceStatus returned FALSE -- error %d\n", GetLastError());
+		return;
+	}
+
+	StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Service has stopped.");
+	WriteBufferToLog();
+
+	if (INVALID_HANDLE_VALUE != logHandle) {
+		CloseHandle(logHandle);
+	}	
 }
 
 /// <summary>
@@ -109,7 +198,7 @@ exit:
 /// <param name=""></param>
 void WriteBufferToLog(void) {
 	assert(logHandle != INVALID_HANDLE_VALUE);
-	if (!(WriteFile(logHandle, logBuffer, (wcslen(logBuffer) + 1 * sizeof(WCHAR)), nullptr, nullptr))) {
+	if (!(WriteFile(logHandle, logBuffer, (wcslen(logBuffer) + 1) * sizeof(WCHAR), nullptr, nullptr))) {
 		wprintf(L"Failed to write to logfile Error: %d.\n", GetLastError());
 	}
 	StringCbPrintf(logBuffer, (MAX_PATH * sizeof(WCHAR)), L"");
@@ -131,9 +220,26 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam) {
 
 	PLUID nextLogonSessionID = nullptr;
 
+	HANDLE waitableObjects[2] = { serviceToStopEvent, workerWaitableTimer };
+	DWORD waitResult = MAXDWORD;
+	assert(waitableObjects[0] != INVALID_HANDLE_VALUE);
+	assert(waitableObjects[0] != NULL);
+	assert(waitableObjects[1] != INVALID_HANDLE_VALUE);
+	assert(waitableObjects[1] != NULL);
+	
+	StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Started ShutdownBuddy service worker thread\n");
+	WriteBufferToLog();
+
 	for (;;) {
-		StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Started ShutdownBuddy service\n");
+		// check for the signalled state of the stop event
+		if (waitResult == WAIT_OBJECT_0) {
+			// being signalled to stop
+			return ERROR_SUCCESS;
+		}
+		StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Worker thread wait result is %d", waitResult);
 		WriteBufferToLog();
+		
+		
 		result = LsaEnumerateLogonSessions(&logonSessionCount, &logonSessionListPtr);
 
 		if (STATUS_SUCCESS != result) {
@@ -144,7 +250,7 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam) {
 		wprintf(L"logon session count: %d\n", logonSessionCount);
 
 		do {
-			NTSTATUS result = LsaGetLogonSessionData(logonSessionListPtr, &logonSessionData);
+			result = LsaGetLogonSessionData(logonSessionListPtr, &logonSessionData);
 
 			if (STATUS_SUCCESS == result) {
 				StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"username: %s\n", logonSessionData->UserName.Buffer);
@@ -169,7 +275,40 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam) {
 		} while (logonSessionCount > 0);
 
 		LsaFreeReturnBuffer(logonSessionListPtr);
+
+		// wait for either the timer or the event
+		waitResult = WaitForMultipleObjects(2, waitableObjects, FALSE, INFINITE);
 	}
 
 	return ERROR_SUCCESS;
+}
+
+/// <summary>
+/// Responds to control events from the service manager.
+/// </summary>
+/// <param name="controlCode"></param>
+/// <returns></returns>
+VOID WINAPI ServiceCtrlHandler(DWORD controlCode) {
+	switch (controlCode) {
+	case SERVICE_CONTROL_STOP:
+		// note that we are stopping
+		ZeroMemory(&serviceStatus, sizeof(serviceStatus));
+		serviceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
+		serviceStatus.dwCurrentState = SERVICE_STOP_PENDING;
+		serviceStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP;
+		serviceStatus.dwWin32ExitCode = 0;
+		serviceStatus.dwServiceSpecificExitCode = 0;
+		serviceStatus.dwCheckPoint = 0;
+		serviceStatus.dwWaitHint = 0;
+		if (!SetServiceStatus(statusHandle, &serviceStatus)) {
+			wprintf(L"SetServiceStatus returned FALSE -- error %d\n", GetLastError());
+			return;
+		}
+
+		StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Stopping service...\n");
+		WriteBufferToLog();
+
+		SetEvent(serviceToStopEvent);
+		break;
+	}
 }
