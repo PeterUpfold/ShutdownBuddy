@@ -61,6 +61,16 @@ LARGE_INTEGER timerDueTime = { 0 };
 HANDLE serviceToStopEvent = INVALID_HANDLE_VALUE;
 HANDLE workerThread = INVALID_HANDLE_VALUE;
 
+/// <summary>
+/// SIDS of sessions to ignore for the purposes of determining if a real human
+/// is signed in.
+/// </summary>
+WELL_KNOWN_SID_TYPE wellKnownSids[] = {
+	WinNtAuthoritySid,
+	WinLocalSystemSid,
+	WinLocalServiceSid,
+	WinNetworkServiceSid,
+};
 
 
 /// <summary>
@@ -289,6 +299,17 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam) {
 				StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"logonType: %d\r\n", logonSessionData->LogonType);
 				WriteBufferToLog();
 
+				PSID_IDENTIFIER_AUTHORITY authority = GetSidIdentifierAuthority(logonSessionData->Sid);
+				if (authority != nullptr) {
+					StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"authority: %p\r\n", authority->Value); // what is Value? Why can't I ndex by array item?
+					WriteBufferToLog();
+				}
+				else {
+					StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Unable to get authority from sid\r\n");
+					WriteBufferToLog();
+				}
+				
+
 				/* logonType
 				0
 
@@ -346,13 +367,27 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam) {
 				if (!ConvertSidToStringSidW(logonSessionData->Sid, &sidString)) {
 					StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Unable to convert SID: %d\r\n", GetLastError());
 					WriteBufferToLog();
+					sidString = nullptr;
 				}
 				else {
 					StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"sid: %s\r\n", sidString);
-					WriteBufferToLog();
+					WriteBufferToLog();				
+				}
+
+				
+
+				for (int i = 0; i < (sizeof(wellKnownSids) / sizeof(*wellKnownSids)); i++) {
+					if (IsWellKnownSid(logonSessionData->Sid, wellKnownSids[i])) {
+						StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Skipping %s as it is well known %d\r\n", sidString, wellKnownSids[i]);
+						WriteBufferToLog();
+						break;
+					}
+				}
+				 
+				if (sidString != nullptr) {
 					LocalFree(sidString);
 					sidString = nullptr;
-				}
+				}				
 			}
 			else if (STATUS_ACCESS_DENIED == result) {
 				StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Access denied on session reverse numbered %d -- running as admin??\r\n", logonSessionCount);
