@@ -231,7 +231,10 @@ void WriteBufferToLog(void) {
 	if (!(WriteFile(logHandle, logBuffer, (wcslen(logBuffer) + 1) * sizeof(WCHAR), nullptr, nullptr))) {
 		wprintf(L"Failed to write to logfile Error: %d.\r\n", GetLastError());
 	}
+	OutputDebugStringW(logBuffer);
 	StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"");
+
+	
 }
 
 /// <summary>
@@ -253,6 +256,10 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam) {
 
 	HANDLE waitableObjects[2] = { serviceToStopEvent, workerWaitableTimer };
 	DWORD waitResult = MAXDWORD;
+
+	// how many sessions we consider interactive are running
+	int interactiveSessionCount = -1;
+
 	assert(waitableObjects[0] != INVALID_HANDLE_VALUE);
 	assert(waitableObjects[0] != NULL);
 	assert(waitableObjects[1] != INVALID_HANDLE_VALUE);
@@ -289,6 +296,8 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam) {
 		}
 
 		wprintf(L"logon session count: %d\r\n", logonSessionCount);
+		interactiveSessionCount = 0;
+
 
 		do {
 			result = LsaGetLogonSessionData(logonSessionListPtr, &logonSessionData);
@@ -299,13 +308,42 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam) {
 				StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"logonType: %d\r\n", logonSessionData->LogonType);
 				WriteBufferToLog();
 
-				PSID_IDENTIFIER_AUTHORITY authority = GetSidIdentifierAuthority(logonSessionData->Sid);
-				if (authority != nullptr) {
-					StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"authority: %p\r\n", authority->Value); // what is Value? Why can't I ndex by array item?
-					WriteBufferToLog();
+				if (logonSessionData->Sid != nullptr && IsValidSid(logonSessionData->Sid)) {
+					PSID_IDENTIFIER_AUTHORITY authority = GetSidIdentifierAuthority(logonSessionData->Sid);
+					if (authority != nullptr) {
+						StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"authority: 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x\r\n", authority->Value[0], authority->Value[1], authority->Value[2], authority->Value[3], authority->Value[4], authority->Value[5]);
+						//WriteBufferToLog();
+
+						// get sub authorities?
+						PUCHAR subAuthorityCount = GetSidSubAuthorityCount(logonSessionData->Sid);
+						if (GetLastError() == ERROR_SUCCESS && subAuthorityCount != nullptr && *subAuthorityCount > 0) {
+							StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Sub authority count: %d\r\n", *subAuthorityCount);
+							WriteBufferToLog();
+
+							// sub authority 0 seems to be interesting to us -- matches third element of string sid
+							for (DWORD i = 0; i < *subAuthorityCount; i++) {
+								PDWORD subAuthority = GetSidSubAuthority(logonSessionData->Sid, i);
+								if (subAuthority != nullptr) {
+									StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Sub authority %d: 0x%x\r\n", i, *subAuthority);
+									//WriteBufferToLog();
+								}
+							}
+
+							// heuristic: if sub authority count >4, this is a _real_ session?
+							if (*subAuthorityCount > 4) {
+								StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"I: Session %s counts as interactive\r\n", logonSessionData->UserName.Buffer);
+								WriteBufferToLog();
+								interactiveSessionCount++;
+							}
+						}
+					}
+					else {
+						StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Unable to get authority from sid\r\n");
+						WriteBufferToLog();
+					}
 				}
 				else {
-					StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Unable to get authority from sid\r\n");
+					StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Not fetching authority from null sid\r\n");
 					WriteBufferToLog();
 				}
 				
@@ -363,24 +401,23 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam) {
 
 					Workstation logon.
 				*/
-
-				if (!ConvertSidToStringSidW(logonSessionData->Sid, &sidString)) {
+				if (logonSessionData->Sid != nullptr && !ConvertSidToStringSidW(logonSessionData->Sid, &sidString)) {
 					StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Unable to convert SID: %d\r\n", GetLastError());
 					WriteBufferToLog();
 					sidString = nullptr;
 				}
 				else {
 					StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"sid: %s\r\n", sidString);
-					WriteBufferToLog();				
-				}
+					WriteBufferToLog();		
 
-				
-
-				for (int i = 0; i < (sizeof(wellKnownSids) / sizeof(*wellKnownSids)); i++) {
-					if (IsWellKnownSid(logonSessionData->Sid, wellKnownSids[i])) {
-						StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Skipping %s as it is well known %d\r\n", sidString, wellKnownSids[i]);
-						WriteBufferToLog();
-						break;
+					for (int i = 0; i < (sizeof(wellKnownSids) / sizeof(*wellKnownSids)); i++) {
+						if (IsWellKnownSid(logonSessionData->Sid, wellKnownSids[i])) {
+							StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Skipping %s as it is well known %d\r\n", sidString, wellKnownSids[i]);
+							WriteBufferToLog();
+							StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"\r\n");
+							WriteBufferToLog();
+							break;
+						}
 					}
 				}
 				 
@@ -403,13 +440,17 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam) {
 
 			LsaFreeReturnBuffer(logonSessionData);
 
+
 		} while (logonSessionCount > 0);
 
 		LsaFreeReturnBuffer(logonSessionListPtr);
 		StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"\r\n");
 		WriteBufferToLog();
 
-		EnumWindowStationsW(EnumWindowStationProc, NULL);
+		//EnumWindowStationsW(EnumWindowStationProc, NULL);
+
+		StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"HEURISTIC: %d sessions are active", interactiveSessionCount);
+		WriteBufferToLog();
 
 		StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"\r\n------------------------\r\n");
 		WriteBufferToLog();
@@ -461,7 +502,7 @@ BOOL CALLBACK EnumWindowStationProc(
 	_In_ LPTSTR windowStation,
 	_In_ LPARAM param
 ) {
-	StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"%s\r\n", windowStation);
-	WriteBufferToLog();
+	//StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"%s\r\n", windowStation);
+	//WriteBufferToLog();
 	return TRUE;
 }
