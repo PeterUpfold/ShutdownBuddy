@@ -257,6 +257,11 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam) {
 	HANDLE waitableObjects[2] = { serviceToStopEvent, workerWaitableTimer };
 	DWORD waitResult = MAXDWORD;
 
+	// Will hold the path to the HKEY_USERS subkey for a session
+	WCHAR hkeyUsersSubKey[MAX_PATH + 1] = L"";
+
+	HKEY hkeyUsersSubKeyHandle = { 0 };
+
 	// how many sessions we consider interactive are running
 	int interactiveSessionCount = -1;
 
@@ -301,6 +306,7 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam) {
 
 		do {
 			result = LsaGetLogonSessionData(logonSessionListPtr, &logonSessionData);
+			sidString = nullptr;
 
 			if (STATUS_SUCCESS == result) {
 				StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"username: %s\r\n", logonSessionData->UserName.Buffer);
@@ -309,6 +315,13 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam) {
 				WriteBufferToLog();
 
 				if (logonSessionData->Sid != nullptr && IsValidSid(logonSessionData->Sid)) {
+
+					if (!ConvertSidToStringSidW(logonSessionData->Sid, &sidString)) {
+						StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Unable to convert SID: %d\r\n", GetLastError());
+						WriteBufferToLog();
+						sidString = nullptr;
+					}
+
 					PSID_IDENTIFIER_AUTHORITY authority = GetSidIdentifierAuthority(logonSessionData->Sid);
 					if (authority != nullptr) {
 						StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"authority: 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x\r\n", authority->Value[0], authority->Value[1], authority->Value[2], authority->Value[3], authority->Value[4], authority->Value[5]);
@@ -331,9 +344,25 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam) {
 
 							// heuristic: if sub authority count >4, this is a _real_ session?
 							if (*subAuthorityCount > 4) {
-								StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"I: Session %s counts as interactive\r\n", logonSessionData->UserName.Buffer);
+								StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"I: Session %s possibly counts as interactive\r\n", logonSessionData->UserName.Buffer);
 								WriteBufferToLog();
-								interactiveSessionCount++;
+
+								// determine for sure if this is interactive -- check for Volatile Environment subkey of HKEY_USERS with this SID
+								StringCbPrintf(hkeyUsersSubKey, MAX_PATH, L"%s\\Volatile Environment", sidString);
+								
+								LSTATUS regResult = RegOpenKeyExW(HKEY_USERS, hkeyUsersSubKey, 0, KEY_READ, &hkeyUsersSubKeyHandle);
+								if (regResult == ERROR_SUCCESS) {
+									StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"I: Return value for Volatile Env for session %s was %d -- interactive\r\n", logonSessionData->UserName.Buffer, regResult);
+									WriteBufferToLog();
+
+									interactiveSessionCount++;
+
+									RegCloseKey(hkeyUsersSubKeyHandle);
+								}
+								else {
+									StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"I: Return value for Volatile Env for session %s was %d -- probably not interactive\r\n", logonSessionData->UserName.Buffer, regResult);
+									WriteBufferToLog();
+								}
 							}
 						}
 					}
@@ -401,12 +430,7 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam) {
 
 					Workstation logon.
 				*/
-				if (logonSessionData->Sid != nullptr && !ConvertSidToStringSidW(logonSessionData->Sid, &sidString)) {
-					StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Unable to convert SID: %d\r\n", GetLastError());
-					WriteBufferToLog();
-					sidString = nullptr;
-				}
-				else {
+				if (sidString != nullptr) {
 					StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"sid: %s\r\n", sidString);
 					WriteBufferToLog();		
 

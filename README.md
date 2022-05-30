@@ -7,5 +7,7 @@ Experimental.
 
 ## Test Installation
 
+Ensure that the VC redist for 
+
     sc.exe create ShutdownBuddy binPath= "\path\to\ShutdownBuddy.exe"
     Start-Service ShutdownBuddy
