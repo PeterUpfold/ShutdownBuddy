@@ -54,8 +54,8 @@ WCHAR logBuffer[MAX_PATH] = { 0 };
 #define HUNDREDNS_IN_MS 10000
 
 // Default time to wait before shutdown -- seconds
-//#define DEFAULT_WAIT_BEFORE_IDLE_SHUTDOWN 3600
-#define DEFAULT_WAIT_BEFORE_IDLE_SHUTDOWN 120
+#define DEFAULT_WAIT_BEFORE_IDLE_SHUTDOWN 3600
+//#define DEFAULT_WAIT_BEFORE_IDLE_SHUTDOWN 120
 
 // Registry root key for settings
 #define SHUTDOWN_BUDDY_REG_ROOT L"SOFTWARE\\upfold.org.uk\\ShutdownBuddy"
@@ -93,6 +93,11 @@ LONGLONG waitTimerIntervalSeconds = DEFAULT_WAIT_TIMER_INTERVAL_SECONDS;
 LONGLONG waitBeforeIdleShutdownSeconds = DEFAULT_WAIT_BEFORE_IDLE_SHUTDOWN;
 
 /// <summary>
+/// Should log to a temporary file in %TEMP%
+/// </summary>
+BOOL shouldDebugLog = FALSE;
+
+/// <summary>
 /// Entry point
 /// </summary>
 /// <param name="argc"></param>
@@ -123,25 +128,33 @@ int wmain(int argc, WCHAR* argv[]) {
 /// <param name="argv"></param>
 /// <returns></returns>
 void WINAPI ServiceMain(DWORD argc, LPTSTR* argv) {
+
+	// get settings
+	LoadSettingsFromRegistry();
+
 	// prepare temporary file for logging
 	WCHAR tempPath[MAX_PATH + 1] = { 0 };
 	WCHAR tempFileName[MAX_PATH + 1] = { 0 };
 
-	if (GetTempPath(MAX_PATH, tempPath) == 0) {
-		wprintf(L"Unable to get temp path name\n");
-		goto exit;
-	}
+	logHandle = INVALID_HANDLE_VALUE;
 
-	if (GetTempFileName(tempPath, L"SdB", 0, tempFileName) == 0) {// capped to MAX_PATH
-		wprintf(L"Unable to get temp file name\n");
-		goto exit;
-	}
+	if (shouldDebugLog) {
+		if (GetTempPath(MAX_PATH, tempPath) == 0) {
+			wprintf(L"Unable to get temp path name\n");
+			goto exit;
+		}
 
-	// start logging
-	logHandle = CreateFile(tempFileName, GENERIC_WRITE, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-	if (logHandle == INVALID_HANDLE_VALUE) {
-		wprintf(L"Unable to open temp file for writing: %s (error 0x%x)", tempFileName, GetLastError());
-		goto exit;
+		if (GetTempFileName(tempPath, L"SdB", 0, tempFileName) == 0) {// capped to MAX_PATH
+			wprintf(L"Unable to get temp file name\n");
+			goto exit;
+		}
+
+		// start logging
+		logHandle = CreateFile(tempFileName, GENERIC_WRITE, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+		if (logHandle == INVALID_HANDLE_VALUE) {
+			wprintf(L"Unable to open temp file for writing: %s (error 0x%x)", tempFileName, GetLastError());
+			goto exit;
+		}
 	}
 
 	StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Started ShutdownBuddy service\n");
@@ -246,14 +259,13 @@ exit:
 /// </summary>
 /// <param name=""></param>
 void WriteBufferToLog(void) {
-	assert(logHandle != INVALID_HANDLE_VALUE);
-	if (!(WriteFile(logHandle, logBuffer, (wcslen(logBuffer) + 1) * sizeof(WCHAR), nullptr, nullptr))) {
-		wprintf(L"Failed to write to logfile Error: %d.\r\n", GetLastError());
+	if (logHandle != INVALID_HANDLE_VALUE) {
+		if (!(WriteFile(logHandle, logBuffer, (wcslen(logBuffer) + 1) * sizeof(WCHAR), nullptr, nullptr))) {
+			wprintf(L"Failed to write to logfile Error: %d.\r\n", GetLastError());
+		}
 	}
 	OutputDebugStringW(logBuffer);
 	StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"");
-
-	
 }
 
 /// <summary>
@@ -307,6 +319,7 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam) {
 	if (!AdjustTokenPrivilegesForShutdown()) {
 		return ERROR_ACCESS_DENIED;
 	}
+
 
 	StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Evaluating sessions every %lld seconds. Shutdown after %lld seconds (%lld evaluation runs with 0 sessions)\r\n", waitTimerIntervalSeconds, waitBeforeIdleShutdownSeconds, (waitBeforeIdleShutdownSeconds / waitTimerIntervalSeconds));
 	WriteBufferToLog();
@@ -716,14 +729,34 @@ BOOL ExplorerIsRunningAsSID(PSID sid) {
 /// <param name=""></param>
 void LoadSettingsFromRegistry(void) {
 	HKEY rootKey{};
+	DWORD dwResult = 0;
+	DWORD dataSize = sizeof(dwResult);
+
+	WCHAR debugString[MAX_PATH] = L"";
 
 	if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, SHUTDOWN_BUDDY_REG_ROOT, 0, KEY_READ, &rootKey) != ERROR_SUCCESS) {
-		StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Unable to open settings from registry. Will use default. (%d)", GetLastError());
-		WriteBufferToLog();
+		// log buffer is not yet available.
+		OutputDebugStringW(L"Unable to open settings from registry. Will use default.");
 		return;
 	}
 
-	// TODO complete
+	if (RegGetValueW(rootKey, L"", L"DebugLog", RRF_RT_DWORD | RRF_ZEROONFAILURE, NULL, &dwResult, &dataSize) == ERROR_SUCCESS) {
+		if (dwResult == 1) {
+			OutputDebugStringW(L"Should debug log to temp file");
+			shouldDebugLog = TRUE;
+		}
+	}
+
+	if (RegGetValueW(rootKey, L"", L"EvaluationIntervalSeconds", RRF_RT_DWORD | RRF_ZEROONFAILURE, NULL, &dwResult, &dataSize) == ERROR_SUCCESS) {
+		waitTimerIntervalSeconds = dwResult;
+	}
+
+	if (RegGetValueW(rootKey, L"", L"ShutdownAfterIdleForSeconds", RRF_RT_DWORD | RRF_ZEROONFAILURE, NULL, &dwResult, &dataSize) == ERROR_SUCCESS) {
+		waitBeforeIdleShutdownSeconds = dwResult;
+	}
+
+	/*StringCbPrintf(debugString, MAX_PATH, L"Registry result: %d", result);
+	OutputDebugStringW(debugString);*/
 
 	RegCloseKey(rootKey);
 }
