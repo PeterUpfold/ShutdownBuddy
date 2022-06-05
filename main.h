@@ -13,3 +13,7 @@ BOOL CALLBACK EnumWindowStationProc(
 );
 
 BOOL ExplorerIsRunningAsSID(PSID sid);
+
+void LoadSettingsFromRegistry(void);
+
+BOOL AdjustTokenPrivilegesForShutdown(void);

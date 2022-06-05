@@ -8,6 +8,7 @@
 #include <processthreadsapi.h>
 #include <sddl.h>
 #include <TlHelp32.h>
+#include <winreg.h>
 #include "main.h"
 #pragma comment(lib, "secur32")
 
@@ -43,9 +44,21 @@ WCHAR logBuffer[MAX_PATH] = { 0 };
 #define LOG_BUFFER_SIZE (MAX_PATH * sizeof(WCHAR))
 #define SERVICE_NAME L"ShutdownBuddy"
 
-#define WAIT_TIMER_INTERVAL_SECONDS 60
+// Default time to wait between evaluations -- seconds
+#define DEFAULT_WAIT_TIMER_INTERVAL_SECONDS 60
+
+// Number of milliseconds in 1 second
 #define MS_IN_S 1000
+
+// Number of hundred nanosecond increments in 1ms
 #define HUNDREDNS_IN_MS 10000
+
+// Default time to wait before shutdown -- seconds
+//#define DEFAULT_WAIT_BEFORE_IDLE_SHUTDOWN 3600
+#define DEFAULT_WAIT_BEFORE_IDLE_SHUTDOWN 120
+
+// Registry root key for settings
+#define SHUTDOWN_BUDDY_REG_ROOT L"SOFTWARE\\upfold.org.uk\\ShutdownBuddy"
 
 /* Synchronisation and looping
 * 
@@ -73,6 +86,11 @@ WELL_KNOWN_SID_TYPE wellKnownSids[] = {
 	WinNetworkServiceSid,
 };
 
+// How frequently in seconds we evaluate for sessions.
+LONGLONG waitTimerIntervalSeconds = DEFAULT_WAIT_TIMER_INTERVAL_SECONDS;
+
+// How many seconds before we issue a shutdown if all evaluations for interactive sessions were zero.
+LONGLONG waitBeforeIdleShutdownSeconds = DEFAULT_WAIT_BEFORE_IDLE_SHUTDOWN;
 
 /// <summary>
 /// Entry point
@@ -158,7 +176,7 @@ void WINAPI ServiceMain(DWORD argc, LPTSTR* argv) {
 		wprintf(L"Unable to create waitable timer for the worker thread -- error %d\n", GetLastError());
 		BailOnServiceStart;
 	}
-	timerDueTime.QuadPart = -(WAIT_TIMER_INTERVAL_SECONDS * MS_IN_S * HUNDREDNS_IN_MS);
+	timerDueTime.QuadPart = -(waitTimerIntervalSeconds * MS_IN_S * HUNDREDNS_IN_MS);
 
 
 	// prepare the stop event
@@ -266,12 +284,31 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam) {
 	// how many sessions we consider interactive are running
 	int interactiveSessionCount = -1;
 
+	/* The number of consecutive evaluations for interactive sessions that has returned zero. When this
+	* reaches a threshold of the shutdown period divided by the interval, we should shut down.
+	*/
+	int consecutiveZeroEvaluations = 0;
+
+
+
 	assert(waitableObjects[0] != INVALID_HANDLE_VALUE);
 	assert(waitableObjects[0] != NULL);
 	assert(waitableObjects[1] != INVALID_HANDLE_VALUE);
 	assert(waitableObjects[1] != NULL);
 	
 	StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Started ShutdownBuddy service worker thread\r\n");
+	WriteBufferToLog();
+
+	//while (!IsDebuggerPresent()) {
+	//	Sleep(1000);
+	//}
+
+	// acquire privileges for shutdown
+	if (!AdjustTokenPrivilegesForShutdown()) {
+		return ERROR_ACCESS_DENIED;
+	}
+
+	StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Evaluating sessions every %lld seconds. Shutdown after %lld seconds (%lld evaluation runs with 0 sessions)\r\n", waitTimerIntervalSeconds, waitBeforeIdleShutdownSeconds, (waitBeforeIdleShutdownSeconds / waitTimerIntervalSeconds));
 	WriteBufferToLog();
 
 	for (;;) {
@@ -288,10 +325,6 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam) {
 			WriteBufferToLog();
 			return GetLastError();
 		}
-
-		/*StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Worker thread wait result is %d\n", waitResult);
-		WriteBufferToLog();*/
-
 		result = LsaEnumerateLogonSessions(&logonSessionCount, &logonSessionListPtr);
 
 		if (STATUS_SUCCESS != result) {
@@ -476,13 +509,32 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam) {
 		StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"\r\n");
 		WriteBufferToLog();
 
-		//EnumWindowStationsW(EnumWindowStationProc, NULL);
-
 		StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"HEURISTIC: %d sessions are active", interactiveSessionCount);
 		WriteBufferToLog();
 
 		StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"\r\n------------------------\r\n");
 		WriteBufferToLog();
+
+		if (interactiveSessionCount == 0) {
+			consecutiveZeroEvaluations++;
+			StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Consecutive zero session evaluation runs: %d", consecutiveZeroEvaluations);
+			WriteBufferToLog();
+		}
+		else {
+			consecutiveZeroEvaluations = 0;
+		}
+
+		// should we issue a shutdown command?
+		if (consecutiveZeroEvaluations > (waitBeforeIdleShutdownSeconds / waitTimerIntervalSeconds)) {
+			StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Time to shut down!");
+			WriteBufferToLog();
+
+			if (!InitiateSystemShutdownExW(NULL, NULL, 0, TRUE, FALSE, SHTDN_REASON_MAJOR_APPLICATION)) {
+				StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Failed to initiate shutdown: 0x%x", GetLastError());
+				WriteBufferToLog();
+			}
+		}
+
 
 		// wait for either the timer or the event
 		waitResult = WaitForMultipleObjects(2, waitableObjects, FALSE, INFINITE);
@@ -656,4 +708,69 @@ BOOL ExplorerIsRunningAsSID(PSID sid) {
 	CloseHandle(snapshot);
 
 	return FALSE;
+}
+
+/// <summary>
+/// Load our settings from the registry.
+/// </summary>
+/// <param name=""></param>
+void LoadSettingsFromRegistry(void) {
+	HKEY rootKey{};
+
+	if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, SHUTDOWN_BUDDY_REG_ROOT, 0, KEY_READ, &rootKey) != ERROR_SUCCESS) {
+		StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Unable to open settings from registry. Will use default. (%d)", GetLastError());
+		WriteBufferToLog();
+		return;
+	}
+
+	// TODO complete
+
+	RegCloseKey(rootKey);
+}
+
+/// <summary>
+/// Adjust our own token privileges to enable the SeShutdownPrivilege
+/// </summary>
+/// <param name=""></param>
+/// <returns></returns>
+BOOL AdjustTokenPrivilegesForShutdown(void) {
+	HANDLE token = INVALID_HANDLE_VALUE;
+	LUID shutdownPrivLuid{};
+	TOKEN_PRIVILEGES tp{  };
+
+	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token)) {
+		StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Unable to OpenProcessToken for adjusting -- 0x%x", GetLastError());
+		WriteBufferToLog();
+		return FALSE;
+	}
+
+	if (!LookupPrivilegeValueW(NULL, SE_SHUTDOWN_NAME, &shutdownPrivLuid)) {
+		StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Unable to get SeShutdownPrivilege LUID -- 0x%x", GetLastError());
+		WriteBufferToLog();
+		CloseHandle(token);
+		return FALSE;
+	}
+
+	tp.PrivilegeCount = 1;
+	tp.Privileges[0].Luid = shutdownPrivLuid;
+	tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+
+	if (!AdjustTokenPrivileges(token, FALSE, &tp, sizeof(TOKEN_PRIVILEGES), (PTOKEN_PRIVILEGES)NULL, (PDWORD)NULL)) {
+		StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Unable to adjust token privileges to add SeShutdownPrivilege -- 0x%x", GetLastError());
+		WriteBufferToLog();
+		CloseHandle(token);
+		return FALSE;
+	}
+
+	if (GetLastError() == ERROR_NOT_ALL_ASSIGNED) {
+		StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"The token did not get all the assigned privileges after adjustment");
+		WriteBufferToLog();
+		CloseHandle(token);
+		return FALSE;
+	}
+	StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Adjusted token to add SeShutdownPrivilege");
+	CloseHandle(token);
+	WriteBufferToLog();
+
+	return TRUE;
 }
