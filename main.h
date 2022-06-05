@@ -11,3 +11,5 @@ BOOL CALLBACK EnumWindowStationProc(
 	_In_ LPTSTR windowStation,
 	_In_ LPARAM param
 );
+
+BOOL ExplorerIsRunningAsSID(PSID sid);

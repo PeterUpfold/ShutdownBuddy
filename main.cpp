@@ -7,6 +7,7 @@
 #include <strsafe.h>
 #include <processthreadsapi.h>
 #include <sddl.h>
+#include <TlHelp32.h>
 #include "main.h"
 #pragma comment(lib, "secur32")
 
@@ -352,10 +353,14 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam) {
 								
 								LSTATUS regResult = RegOpenKeyExW(HKEY_USERS, hkeyUsersSubKey, 0, KEY_READ, &hkeyUsersSubKeyHandle);
 								if (regResult == ERROR_SUCCESS) {
-									StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"I: Return value for Volatile Env for session %s was %d -- interactive\r\n", logonSessionData->UserName.Buffer, regResult);
+									StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"I: Return value for Volatile Env for session %s was %d -- interactive if explorer is running\r\n", logonSessionData->UserName.Buffer, regResult);
 									WriteBufferToLog();
 
-									interactiveSessionCount++;
+									if (ExplorerIsRunningAsSID(logonSessionData->Sid)) {
+										StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"I: Explorer runs as this SID. This is interactive.\r\n");
+										WriteBufferToLog();
+										interactiveSessionCount++;
+									}
 
 									RegCloseKey(hkeyUsersSubKeyHandle);
 								}
@@ -529,4 +534,126 @@ BOOL CALLBACK EnumWindowStationProc(
 	//StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"%s\r\n", windowStation);
 	//WriteBufferToLog();
 	return TRUE;
+}
+
+/// <summary>
+/// Check for an Explorer process running as the target SID
+/// </summary>
+/// <param name="sid"></param>
+/// <returns>TRUE or FALSE</returns>
+BOOL ExplorerIsRunningAsSID(PSID sid) {
+	HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	HANDLE process = INVALID_HANDLE_VALUE;
+	HANDLE processToken = INVALID_HANDLE_VALUE;
+	PROCESSENTRY32 pe32{};
+	PTOKEN_OWNER processOwner = nullptr;
+	DWORD tokenInformationLength = 0;
+
+	if (snapshot == INVALID_HANDLE_VALUE) {
+		StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Failed to get Toolhelp snapshot of processes\n");
+		WriteBufferToLog();
+		return FALSE;
+	}
+
+	pe32.dwSize = sizeof(PROCESSENTRY32);
+
+	if (!Process32First(snapshot, &pe32)) {
+		StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Process32First failed\n");
+		WriteBufferToLog();
+		CloseHandle(snapshot);
+		return FALSE;
+	}
+
+	do {
+		if (_wcsicmp(pe32.szExeFile, L"explorer.exe") == 0) {
+			// open process for query
+			process = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pe32.th32ProcessID);
+			
+			if (process == INVALID_HANDLE_VALUE || process == NULL) {
+				StringCbPrintf(logBuffer,
+					LOG_BUFFER_SIZE,
+					L"Failed to open handle to explorer.exe with PID %d. Error: %d\n",
+					pe32.th32ProcessID,
+					GetLastError());
+				WriteBufferToLog();
+				CloseHandle(snapshot);
+				return FALSE;
+			}
+
+			// open a handle to the token for the process
+			if (!OpenProcessToken(process, TOKEN_READ, &processToken)) {
+				StringCbPrintf(logBuffer,
+					LOG_BUFFER_SIZE,
+					L"Failed to open handle to token for process %d. Error: %d\n",
+					pe32.th32ProcessID,
+					GetLastError());
+				WriteBufferToLog();
+				CloseHandle(process);
+				CloseHandle(snapshot);
+				return FALSE;
+			}
+
+			// get SID of token owner -- first get and check required buffer size
+			GetTokenInformation(processToken, TokenOwner, processOwner, 0, &tokenInformationLength);
+
+			processOwner = (PTOKEN_OWNER)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, tokenInformationLength);
+			if (processOwner == NULL) {
+				StringCbPrintf(logBuffer,
+					LOG_BUFFER_SIZE,
+					L"Failed to allocate memory for process owner info. Error: %d\n",
+					GetLastError());
+				WriteBufferToLog();
+				CloseHandle(processToken);
+				CloseHandle(process);
+				CloseHandle(snapshot);
+				return FALSE;
+			}
+
+			if (!GetTokenInformation(processToken, TokenOwner, processOwner, tokenInformationLength, &tokenInformationLength)) {
+				StringCbPrintf(logBuffer,
+					LOG_BUFFER_SIZE,
+					L"Failed to get token information for process %d. Error: %d\n",
+					pe32.th32ProcessID,
+					GetLastError());
+				WriteBufferToLog();
+				HeapFree(GetProcessHeap(), 0, processOwner);
+				CloseHandle(processToken);
+				CloseHandle(process);
+				CloseHandle(snapshot);
+				return FALSE;
+			}
+
+			// now we have the token info
+
+			if (EqualSid(processOwner->Owner, sid)) {
+				StringCbPrintf(logBuffer,
+					LOG_BUFFER_SIZE,
+					L"Explorer %d is running as the target SID\n",
+					pe32.th32ProcessID);
+				WriteBufferToLog();
+
+				//FreeSid(processOwner->Owner); -- this causes a crash, but whose responsibility is freeing these SIDs?? Do they need it?
+				HeapFree(GetProcessHeap(), 0, processOwner);
+				CloseHandle(processToken);
+				CloseHandle(process);
+				CloseHandle(snapshot);
+				return TRUE;
+			}
+			
+			StringCbPrintf(logBuffer,
+				LOG_BUFFER_SIZE,
+				L"Explorer %d is NOT running as the target SID\n",
+				pe32.th32ProcessID);
+			WriteBufferToLog();
+			//FreeSid(processOwner->Owner); -- this causes a crash, but whose responsibility is freeing these SIDs?? Do they need it?
+			HeapFree(GetProcessHeap(), 0, processOwner);
+			CloseHandle(processToken);
+			CloseHandle(process);			
+			continue;
+		}
+	} while (Process32Next(snapshot, &pe32));
+
+	CloseHandle(snapshot);
+
+	return FALSE;
 }
