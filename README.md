@@ -11,3 +11,9 @@ Ensure that the VC redist for
 
     sc.exe create ShutdownBuddy binPath= "\path\to\ShutdownBuddy.exe"
     Start-Service ShutdownBuddy
+
+## Configuration
+
+Configuration of the timeouts, etc. will use the Windows registry.
+
+    HKLM\SOFTWARE\ShutdownBuddy 
