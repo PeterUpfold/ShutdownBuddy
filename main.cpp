@@ -378,8 +378,8 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam) {
 						PUCHAR subAuthorityCount = GetSidSubAuthorityCount(logonSessionData->Sid);
 						if (GetLastError() == ERROR_SUCCESS && subAuthorityCount != nullptr && *subAuthorityCount > 0) {
 							StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Sub authority count: %d\r\n", *subAuthorityCount);
-							WriteBufferToLog();
-
+							//WriteBufferToLog();
+							
 							// sub authority 0 seems to be interesting to us -- matches third element of string sid
 							for (DWORD i = 0; i < *subAuthorityCount; i++) {
 								PDWORD subAuthority = GetSidSubAuthority(logonSessionData->Sid, i);
@@ -542,10 +542,15 @@ DWORD WINAPI ServiceWorkerThread(LPVOID lpParam) {
 			StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Time to shut down!");
 			WriteBufferToLog();
 
-			if (!InitiateSystemShutdownExW(NULL, NULL, 0, TRUE, FALSE, SHTDN_REASON_MAJOR_APPLICATION)) {
+			LPWSTR shutdownReason = (LPWSTR)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, MAX_PATH * sizeof(WCHAR));
+
+			StringCbPrintf(shutdownReason, MAX_PATH, L"ShutdownBuddy initiated a shutdown after %d consecutive evaluations of no interactive users signed in.", consecutiveZeroEvaluations);
+				
+			if (!InitiateSystemShutdownExW(NULL, shutdownReason, 0, TRUE, FALSE, SHTDN_REASON_MAJOR_APPLICATION)) {
 				StringCbPrintf(logBuffer, LOG_BUFFER_SIZE, L"Failed to initiate shutdown: 0x%x", GetLastError());
 				WriteBufferToLog();
 			}
+			HeapFree(GetProcessHeap(), 0, shutdownReason);
 		}
 
 

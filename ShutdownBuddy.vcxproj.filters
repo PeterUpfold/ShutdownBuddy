@@ -26,5 +26,7 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="README.md" />
+    <None Include="install-ShutdownBuddy.ps1" />
+    <None Include="uninstall-ShutdownBuddy.ps1" />
   </ItemGroup>
 </Project>

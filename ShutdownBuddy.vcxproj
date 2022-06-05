@@ -138,6 +138,11 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
+    <PostBuildEvent />
+    <PostBuildEvent>
+      <Command>powershell -Command "Copy-Item $(ProjectDir)install-ShutdownBuddy.ps1 $(TargetDir)install-ShutdownBuddy.ps1"
+powershell -Command "Copy-Item $(ProjectDir)uninstall-ShutdownBuddy.ps1 $(TargetDir)uninstall-ShutdownBuddy.ps1"</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp" />
@@ -146,7 +151,9 @@
     <ClInclude Include="main.h" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="install-ShutdownBuddy.ps1" />
     <None Include="README.md" />
+    <None Include="uninstall-ShutdownBuddy.ps1" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
