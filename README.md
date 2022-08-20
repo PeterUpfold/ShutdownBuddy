@@ -7,7 +7,7 @@ Experimental.
 
 ## Test Installation
 
-Ensure that the VC redist for 
+[Install the latest VC++ redistributable before trying to install the service](https://docs.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170#visual-studio-2015-2017-2019-and-2022)
 
     sc.exe create ShutdownBuddy binPath= "\path\to\ShutdownBuddy.exe"
     Start-Service ShutdownBuddy
