@@ -1,1 +1,15 @@
-This installer will add ShutdownBuddy as a Windows service.
+ShutdownBuddy
+https://peter.upfold.org.uk/projects/shutdownbuddy
+
+Detect the computer being idle, based on having no interactive signed in Windows sessions, and shut down the computer fully after a configurable period of time.
+
+On the next screen you will be invited to set these options:
+
+    Evaluation interval (seconds) -- How frequently, in seconds, to evaluate for interactive sessions.
+
+    Shutdown after idle for (seconds) -- how many seconds the computer can be idle (with no-one signed in) before a shutdown will occur.
+
+    Debug logging enabled -- set to either 1 or 0. Set to 1 to log activity to a temporary file in C:\WINDOWS\TEMP\Sdb*.tmp
+
+
+This software is licensed under the Apache Licence, version 2.0.

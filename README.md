@@ -1,20 +1,28 @@
 # ShutdownBuddy
 
-Detect the computer being idle, based on zero interactive signed in Windows sessions, and shut down the computer fully if
-there continually are no interactive sessions open.
+Detect the computer being idle, based on having no interactive signed in Windows sessions, and shut down the computer fully after a configurable period of time.
 
-Experimental.
+Machines running ShutdownBuddy will "properly" shut down when no-one is signed in, and not just sleep or hibernate.
 
-## Test Installation
+## Installation
 
-[Install the latest VC++ redistributable before trying to install the service](https://docs.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170#visual-studio-2015-2017-2019-and-2022)
+An installer is provided in releases.
 
-    sc.exe create ShutdownBuddy binPath= "\path\to\ShutdownBuddy.exe"
-    Start-Service ShutdownBuddy
+## Silent installation
+
+To perform a silent installation, use the installer and provide the `/verysilent` switch. You may also set the configuration parameters to set in the registry as the example below.
+
+    install-ShutdownBuddy.exe /verysilent /EvaluationIntervalSeconds=60 /ShutdownAfterIdleForSeconds=3600 /DebugLog=0
+
+## Silent uninstallation
+
+To uninstall, run the uninstaller:
+
+    "C:\Program Files\ShutdownBuddy\unins000.exe" /verysilent
 
 ## Configuration
 
-Configuration will use the Windows registry.
+Configuration uses the Windows registry.
 
     HKLM\SOFTWARE\upfold.org.uk\ShutdownBuddy
 

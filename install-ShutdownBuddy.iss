@@ -24,8 +24,21 @@ OutputBaseFilename=ShutdownBuddy-setup
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
+ArchitecturesInstallIn64BitMode=x64
+DisableDirPage=yes
+
+[Messages]
+FinishedLabel=Setup has finished installing ShutdownBuddy. The service has been started.
 
 [CustomMessages]
+
+[Run]
+Filename: sc.exe; StatusMsg: "Installing service..."; Parameters: "create ShutdownBuddy binPath= ""{app}\ShutdownBuddy.exe"" start= delayed-auto"
+Filename: sc.exe; StatusMsg: "Starting service..."; Parameters: "start ShutdownBuddy"
+
+[UninstallRun]
+Filename: sc.exe; Parameters: "stop ShutdownBuddy"
+Filename: sc.exe; Parameters: "delete ShutdownBuddy"
 
 [Code]
 var
@@ -34,6 +47,33 @@ var
   EvaluationIntervalSecondsInt: Longint;
   ShutdownAfterIdleForSecondsInt: Longint;
   DebugLogInt: Longint;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ResultCode: Integer;
+  MajorVersion: Cardinal;
+  ShouldInstall: Boolean;
+begin
+  // stop the service if it exists
+  Exec('sc.exe', 'stop ShutdownBuddy', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+  // determine if we should install the VC redist
+  if (RegQueryDWordValue(HKEY_LOCAL_MACHINE, 'SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64', 'Major', MajorVersion)) then
+    begin
+      ShouldInstall := MajorVersion < 14;
+    end
+  else
+    begin
+      ShouldInstall := True
+    end;
+  
+  if (ShouldInstall) then
+    begin
+    ExtractTemporaryFile('vcredist.exe');
+    Exec(ExpandConstant('{tmp}\vcredist.exe'), '/passive', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    end;
+  
+end;
 
 procedure InitializeWizard;
 begin
@@ -55,10 +95,39 @@ function NextButtonClick(CurPageID: Integer): Boolean;
 begin
     case CurPageID of InputQueryWizardPageID:
       begin
-      //TODO check if passed on the command line with ExpandConstant and set that way
-        EvaluationIntervalSecondsInt := StrToIntDef(InputQueryWizardPage.Values[0], 60);
-        ShutdownAfterIdleForSecondsInt :=  StrToIntDef(InputQueryWizardPage.Values[1], 3600);
-        DebugLogInt := StrToIntDef(InputQueryWizardPage.Values[2], 0);
+             
+        // command line switch will take precedence if provided, otherwise the UI entry will be used
+        //    if an invalid value is provided (not an integer), we will always fall back to default values
+
+        //EvaluationIntervalSeconds
+        if ExpandConstant('{param:EvaluationIntervalSeconds|notset}') = 'notset' then
+        begin
+          EvaluationIntervalSecondsInt := StrToIntDef(InputQueryWizardPage.Values[0], 60);
+        end
+        else
+        begin
+          EvaluationIntervalSecondsInt := StrToIntDef(ExpandConstant('{param:EvaluationIntervalSeconds|notset}'), 60);
+        end;
+
+        //ShutdownAfterIdleForSeconds
+        if ExpandConstant('{param:ShutdownAfterIdleForSeconds|notset}') = 'notset' then
+        begin
+          ShutdownAfterIdleForSecondsInt :=  StrToIntDef(InputQueryWizardPage.Values[1], 3600);
+        end
+        else
+        begin
+          ShutdownAfterIdleForSecondsInt :=  StrToIntDef(ExpandConstant('{param:ShutdownAfterIdleForSeconds|notset}'), 3600);
+        end;
+
+        //DebugLog
+        if ExpandConstant('{param:DebugLog|notset}') = 'notset' then
+        begin
+          DebugLogInt :=  StrToIntDef(InputQueryWizardPage.Values[2], 0);
+        end
+        else
+        begin
+          DebugLogInt :=  StrToIntDef(ExpandConstant('{param:DebugLog|notset}'), 0);
+        end;
         result := true
       end;
       else result := true;
@@ -82,18 +151,20 @@ begin
 end;
 
 [Registry]
-Root: HKLM64; Subkey: "SOFTWARE\upfold.org.uk"; ValueType: dword; ValueName: "EvaluationIntervalSeconds"; ValueData: "{code:EvaluationIntervalSeconds}"
-Root: HKLM64; Subkey: "SOFTWARE\upfold.org.uk"; ValueType: dword; ValueName: "ShutdownAfterIdleForSeconds"; ValueData: "{code:ShutdownAfterIdleForSeconds}"
-Root: HKLM64; Subkey: "SOFTWARE\upfold.org.uk"; ValueType: dword; ValueName: "DebugLog"; ValueData: "{code:DebugLog}"
+Root: HKLM64; Subkey: "SOFTWARE\upfold.org.uk\ShutdownBuddy"; ValueType: dword; ValueName: "EvaluationIntervalSeconds"; ValueData: "{code:EvaluationIntervalSeconds}"; Flags: uninsdeletevalue
+Root: HKLM64; Subkey: "SOFTWARE\upfold.org.uk\ShutdownBuddy"; ValueType: dword; ValueName: "ShutdownAfterIdleForSeconds"; ValueData: "{code:ShutdownAfterIdleForSeconds}"; Flags: uninsdeletevalue
+Root: HKLM64; Subkey: "SOFTWARE\upfold.org.uk\ShutdownBuddy"; ValueType: dword; ValueName: "DebugLog"; ValueData: "{code:DebugLog}"; Flags: uninsdeletevalue
+Root: HKLM64; Subkey: "SOFTWARE\upfold.org.uk\ShutdownBuddy"; Flags: uninsdeletekeyifempty
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
 Source: "C:\Users\Peter\source\repos\ShutdownBuddy\x64\Release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "C:\Users\Peter\source\repos\ShutdownBuddy\external-resources\vcredist.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall
 ; NOTE: Don't use "Flags: ignoreversion" on any shared system files
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+;Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
 
